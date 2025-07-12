@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment variables
+.env
+.env.local
+.env.production
+discord-price-tracker/.env
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+discord-price-tracker/price_tracker.db
+
+# Logs
+logs/
+*.log
+discord-price-tracker/logs/
+discord-price-tracker/bot_*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Discord bot specific
+price_tracker.db
+bot_*.log
+
+# Project specific
+discord-price-tracker/__pycache__/
+discord-price-tracker/*/__pycache__/
+discord-price-tracker/*/*/__pycache__/ 
