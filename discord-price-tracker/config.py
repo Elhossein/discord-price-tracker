@@ -14,12 +14,26 @@ class Config:
     
     # Discord
     BOT_TOKEN: str = os.getenv("DISCORD_BOT_TOKEN", "")
-    GUILD_ID: Optional[int] = int(os.getenv("DISCORD_GUILD_ID")) if os.getenv("DISCORD_GUILD_ID") else None
+    GUILD_ID: Optional[int] = None
     
     # Admin users
     ADMIN_USER_IDS: List[str] = [
         uid.strip() for uid in os.getenv("ADMIN_USER_IDS", "").split(",") if uid.strip()
     ]
+    
+    # Alert settings
+    FALLBACK_CHANNEL_ID: Optional[int] = None
+    
+    @classmethod
+    def _get_int_env(cls, key: str) -> Optional[int]:
+        """Get integer environment variable"""
+        value = os.getenv(key)
+        if value and value.strip():
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+        return None
     
     # Database
     DATABASE_PATH: str = os.getenv("DATABASE_PATH", "price_tracker.db")
@@ -40,6 +54,10 @@ class Config:
     @classmethod
     def validate(cls) -> bool:
         """Validate configuration"""
+        # Initialize integer environment variables
+        cls.GUILD_ID = cls._get_int_env("DISCORD_GUILD_ID")
+        cls.FALLBACK_CHANNEL_ID = cls._get_int_env("FALLBACK_CHANNEL_ID")
+        
         if not cls.BOT_TOKEN:
             print("❌ DISCORD_BOT_TOKEN not set in .env file")
             return False

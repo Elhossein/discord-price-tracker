@@ -15,6 +15,11 @@ class DMAlerts:
         self.bot = bot
         self.sent_count = 0
         self.failed_count = 0
+        self.fallback_channel_id = None  # Can be set via config
+    
+    def set_fallback_channel(self, channel_id: int):
+        """Set fallback channel for failed DMs"""
+        self.fallback_channel_id = channel_id
     
     async def send_shipping_alert(self, user_discord_id: str, product_name: str,
                                 price: float, threshold: float, product_url: str,
@@ -72,7 +77,7 @@ class DMAlerts:
         
         embed.set_footer(text="Price Tracker Bot • Prices may change!")
         
-        return await self._send_dm(user_discord_id, embed)
+        return await self._send_dm_with_fallback(user_discord_id, embed)
     
     async def send_pickup_alert(self, user_discord_id: str, product_name: str,
                               price: float, threshold: float, product_url: str,
@@ -122,7 +127,7 @@ class DMAlerts:
         
         embed.set_footer(text="Price Tracker Bot • Pickup today!")
         
-        return await self._send_dm(user_discord_id, embed)
+        return await self._send_dm_with_fallback(user_discord_id, embed)
     
     async def send_notification(self, user_discord_id: str, title: str, 
                               message: str, color: int = 0x0099ff) -> bool:
@@ -136,7 +141,18 @@ class DMAlerts:
         )
         embed.set_footer(text="Price Tracker Bot")
         
-        return await self._send_dm(user_discord_id, embed)
+        return await self._send_dm_with_fallback(user_discord_id, embed)
+    
+    async def _send_dm_with_fallback(self, user_discord_id: str, embed: discord.Embed) -> bool:
+        """Send DM to user with channel fallback"""
+        # Try DM first
+        dm_success = await self._send_dm(user_discord_id, embed)
+        
+        if not dm_success and self.fallback_channel_id:
+            # Try fallback channel
+            return await self._send_channel_alert(user_discord_id, embed)
+        
+        return dm_success
     
     async def _send_dm(self, user_discord_id: str, embed: discord.Embed) -> bool:
         """Send DM to user"""
@@ -163,6 +179,31 @@ class DMAlerts:
             logger.error(f"❌ DM failed for {user_discord_id}: {e}")
             return False
     
+    async def _send_channel_alert(self, user_discord_id: str, embed: discord.Embed) -> bool:
+        """Send alert to fallback channel"""
+        try:
+            channel = self.bot.get_channel(self.fallback_channel_id)
+            if not channel:
+                logger.error(f"❌ Fallback channel {self.fallback_channel_id} not found")
+                return False
+            
+            # Add mention to embed
+            try:
+                user = await self.bot.fetch_user(int(user_discord_id))
+                embed.description = f"🔔 <@{user_discord_id}> {embed.description}"
+            except:
+                embed.description = f"🔔 Alert for user {user_discord_id}: {embed.description}"
+            
+            await channel.send(embed=embed)
+            
+            self.sent_count += 1
+            logger.info(f"✅ Channel alert sent for {user_discord_id} in #{channel.name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Channel alert failed for {user_discord_id}: {e}")
+            return False
+    
     def get_stats(self):
         """Get alert statistics"""
         total = self.sent_count + self.failed_count
@@ -171,5 +212,6 @@ class DMAlerts:
         return {
             'sent': self.sent_count,
             'failed': self.failed_count,
-            'success_rate': success_rate
+            'success_rate': success_rate,
+            'fallback_channel': self.fallback_channel_id
         }

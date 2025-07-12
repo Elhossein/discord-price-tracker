@@ -54,6 +54,11 @@ class PriceTrackerBot(commands.Bot):
         """Initialize bot"""
         self.logger.info("🔧 Setting up bot...")
         
+        # Set fallback channel if configured
+        if Config.FALLBACK_CHANNEL_ID:
+            self.dm_alerts.set_fallback_channel(Config.FALLBACK_CHANNEL_ID)
+            self.logger.info(f"✅ Fallback channel set to {Config.FALLBACK_CHANNEL_ID}")
+        
         # Load cogs
         for cog in COGS:
             try:
