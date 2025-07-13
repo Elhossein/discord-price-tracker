@@ -429,6 +429,178 @@ class UserCommands(commands.Cog):
                 ephemeral=True
             )
 
+    # ZIP code management group (NEW)
+    zip_group = app_commands.Group(name="zip", description="Manage your ZIP codes for shipping checks")
+
+    @zip_group.command(name="add", description="Add a ZIP code for shipping checks")
+    @app_commands.describe(
+        zip_code="5-digit ZIP code",
+        label="Optional label for this ZIP code (e.g., 'Home', 'Work')"
+    )
+    async def add_zip(self, interaction: discord.Interaction, zip_code: str, label: str = None):
+        """Add ZIP code to user profile"""
+        
+        # Check user
+        user, error_embed = self.check_user(interaction)
+        if error_embed:
+            await interaction.response.send_message(embed=error_embed, ephemeral=True)
+            return
+        
+        # Validate ZIP
+        valid, clean_zip = validate_zip_code(zip_code)
+        if not valid:
+            await interaction.response.send_message(f"❌ {clean_zip}", ephemeral=True)
+            return
+        
+        # Check if already exists
+        user_zips = self.db.get_user_zip_codes(user.id)
+        for zip_info in user_zips:
+            if zip_info['zip_code'] == clean_zip:
+                await interaction.response.send_message(
+                    f"⚠️ ZIP {clean_zip} already added",
+                    ephemeral=True
+                )
+                return
+        
+        try:
+            # Add ZIP code
+            self.db.add_user_zip_code(user.id, clean_zip, label)
+            
+            embed = discord.Embed(
+                title="✅ ZIP Code Added",
+                description=f"Added ZIP code: **{clean_zip}**",
+                color=0x00ff00
+            )
+            
+            if label:
+                embed.add_field(name="📝 Label", value=label, inline=True)
+            
+            embed.add_field(
+                name="🎯 Benefits",
+                value="• **Walmart:** Shipping checked from all your ZIP codes\n"
+                      "• **Target:** Shipping checked from all your ZIP codes\n"
+                      "• Better availability across multiple locations",
+                inline=False
+            )
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            logger.info(f"User {user.name} added ZIP {clean_zip}")
+            
+        except Exception as e:
+            logger.error(f"Error adding ZIP: {e}")
+            await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
+
+    @zip_group.command(name="list", description="Show your ZIP codes")
+    async def list_zips(self, interaction: discord.Interaction):
+        """List user's ZIP codes"""
+        
+        # Check user
+        user, error_embed = self.check_user(interaction)
+        if error_embed:
+            await interaction.response.send_message(embed=error_embed, ephemeral=True)
+            return
+        
+        zip_codes = self.db.get_user_zip_codes(user.id)
+        
+        if not zip_codes:
+            embed = discord.Embed(
+                title="📍 Your ZIP Codes",
+                description="No additional ZIP codes found.\nUse `/zip add` to add more locations!",
+                color=0x0099ff
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        embed = discord.Embed(
+            title="📍 Your ZIP Codes",
+            description=f"You have {len(zip_codes)} ZIP code(s) configured",
+            color=0x0099ff,
+            timestamp=datetime.utcnow()
+        )
+        
+        for zip_info in zip_codes:
+            status = "🏠 Primary" if zip_info['is_primary'] else "📍 Additional"
+            label = zip_info['label'] or f"ZIP {zip_info['zip_code']}"
+            
+            embed.add_field(
+                name=f"{status} - {zip_info['zip_code']}",
+                value=f"**{label}**\nAdded: {zip_info['created_at'][:10]}",
+                inline=True
+            )
+        
+        embed.add_field(
+            name="ℹ️ How It Works",
+            value="• **Walmart:** Shipping checked from all your ZIP codes + pickup at your stores\n"
+                  "• **Target:** Shipping checked from all your ZIP codes",
+            inline=False
+        )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @zip_group.command(name="remove", description="Remove a ZIP code")
+    @app_commands.describe(zip_code="ZIP code to remove")
+    async def remove_zip(self, interaction: discord.Interaction, zip_code: str):
+        """Remove ZIP code from user profile"""
+        
+        # Check user
+        user, error_embed = self.check_user(interaction)
+        if error_embed:
+            await interaction.response.send_message(embed=error_embed, ephemeral=True)
+            return
+        
+        # Clean ZIP
+        import re
+        clean_zip = re.sub(r'[^\d]', '', zip_code)
+        
+        # Try to remove
+        if self.db.remove_user_zip_code(user.id, clean_zip):
+            await interaction.response.send_message(
+                f"✅ Removed ZIP code {clean_zip}",
+                ephemeral=True
+            )
+            logger.info(f"User {user.name} removed ZIP {clean_zip}")
+        else:
+            await interaction.response.send_message(
+                f"❌ Cannot remove ZIP {clean_zip} (not found or is primary)",
+                ephemeral=True
+            )
+
+    @zip_group.command(name="set_primary", description="Set primary ZIP code")
+    @app_commands.describe(zip_code="ZIP code to set as primary")
+    async def set_primary_zip(self, interaction: discord.Interaction, zip_code: str):
+        """Set primary ZIP code"""
+        
+        # Check user
+        user, error_embed = self.check_user(interaction)
+        if error_embed:
+            await interaction.response.send_message(embed=error_embed, ephemeral=True)
+            return
+        
+        # Clean ZIP
+        import re
+        clean_zip = re.sub(r'[^\d]', '', zip_code)
+        
+        # Try to set primary
+        if self.db.set_primary_zip_code(user.id, clean_zip):
+            embed = discord.Embed(
+                title="✅ Primary ZIP Updated",
+                description=f"Set **{clean_zip}** as your primary ZIP code",
+                color=0x00ff00
+            )
+            embed.add_field(
+                name="📦 Impact",
+                value="• Walmart shipping checks will use this ZIP\n"
+                      "• This becomes your default location",
+                inline=False
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            logger.info(f"User {user.name} set primary ZIP to {clean_zip}")
+        else:
+            await interaction.response.send_message(
+                f"❌ Cannot set {clean_zip} as primary (not found in your ZIP codes)",
+                ephemeral=True
+            )
+
 async def setup(bot):
     """Setup function for Discord.py 2.0+"""
     await bot.add_cog(UserCommands(bot))

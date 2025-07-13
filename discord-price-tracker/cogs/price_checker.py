@@ -4,6 +4,7 @@
 import discord
 from discord.ext import commands, tasks
 import logging
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Any
 
@@ -99,22 +100,42 @@ class PriceChecker(commands.Cog):
                    f"{self.checks_completed} checks, {self.alerts_sent} alerts")
     
     async def _process_walmart_checks(self, checks: List[Dict[str, Any]]):
-        """Process Walmart price checks"""
+        """Process Walmart price checks with multiple ZIP codes"""
         for data in checks:
             user = data['user']
             product = data['product']
             tracked = data['tracked']
             
-            # Check shipping at primary store with user's ZIP
-            result = await self.walmart_scraper.check_price(
-                product.url,
-                user.primary_store_id,
-                user.zip_code
-            )
+            # Get all ZIP codes for this user
+            user_zips = self.db.get_user_zip_codes(user.id)
             
-            await self._process_result(data, result, 'shipping')
+            # If no additional ZIP codes, just use primary
+            if not user_zips:
+                user_zips = [{'zip_code': user.zip_code, 'is_primary': True, 'label': 'Primary'}]
             
-            # Check pickup at additional stores
+            # Check shipping from each ZIP code using primary store
+            for zip_info in user_zips:
+                zip_code = zip_info['zip_code']
+                zip_label = zip_info['label'] or f"ZIP {zip_code}"
+                
+                logger.info(f"Checking Walmart shipping from {zip_label} ({zip_code})")
+                
+                result = await self.walmart_scraper.check_price(
+                    product.url,
+                    user.primary_store_id,
+                    zip_code  # Use this ZIP code instead of user's primary
+                )
+                
+                # Add ZIP info to tracking data for alert processing
+                zip_data = data.copy()
+                zip_data['current_zip'] = zip_info
+                
+                await self._process_result(zip_data, result, 'shipping')
+                
+                # Small delay between ZIP checks
+                await asyncio.sleep(1)
+            
+            # Check pickup at additional stores (unchanged)
             for store in data['pickup_stores']:
                 result = await self.walmart_scraper.check_price(
                     product.url,
@@ -125,7 +146,7 @@ class PriceChecker(commands.Cog):
                 await self._process_result(data, result, 'pickup')
     
     async def _process_target_checks(self, checks: List[Dict[str, Any]]):
-        """Process Target price checks with user's ZIP code"""
+        """Process Target price checks with multiple ZIP codes"""
         
         # Initialize Target scraper if needed
         if not self.target_scraper:
@@ -137,16 +158,36 @@ class PriceChecker(commands.Cog):
             user = data['user']
             product = data['product']
             
-            # Check shipping using user's ZIP code
-            result = await self.target_scraper.check_price(
-                product.url, 
-                zip_code=user.zip_code
-            )
+            # Get all ZIP codes for this user
+            user_zips = self.db.get_user_zip_codes(user.id)
             
-            # Set store_id to include site for clarity
-            result.store_id = "target.com"
+            # If no additional ZIP codes, just use primary
+            if not user_zips:
+                user_zips = [{'zip_code': user.zip_code, 'is_primary': True, 'label': 'Primary'}]
             
-            await self._process_result(data, result, 'shipping')
+            # Check from each ZIP code
+            for zip_info in user_zips:
+                zip_code = zip_info['zip_code']
+                zip_label = zip_info['label'] or f"ZIP {zip_code}"
+                
+                logger.info(f"Checking Target product from {zip_label} ({zip_code})")
+                
+                result = await self.target_scraper.check_price(
+                    product.url, 
+                    zip_code=zip_code
+                )
+                
+                # Set store_id to include ZIP for tracking
+                result.store_id = f"target-{zip_code}"
+                
+                # Add ZIP info to tracking data for alert processing
+                zip_data = data.copy()
+                zip_data['current_zip'] = zip_info
+                
+                await self._process_result(zip_data, result, 'shipping')
+                
+                # Small delay between ZIP checks to avoid rate limiting
+                await asyncio.sleep(1)
     
     async def _process_result(self, tracking_data: Dict[str, Any], 
                             result: PriceResult, alert_type: str):
@@ -183,12 +224,14 @@ class PriceChecker(commands.Cog):
             )
             
             if should_alert:
+                # Get ZIP info if available
+                zip_info = tracking_data.get('current_zip')
                 await self._send_alert(
                     user, product, tracked,
-                    result, alert_type
+                    result, alert_type, zip_info
                 )
     
-    async def _send_alert(self, user, product, tracked, result: PriceResult, alert_type: str):
+    async def _send_alert(self, user, product, tracked, result: PriceResult, alert_type: str, zip_info: Dict = None):
         """Send price alert"""
         
         product_name = product.name or result.product_name or "Product"
@@ -206,7 +249,8 @@ class PriceChecker(commands.Cog):
                 tracked.threshold,
                 product.url,
                 result.store_id,
-                product.site
+                product.site,
+                zip_info
             )
         
         elif alert_type == 'pickup' and product.site == 'walmart':

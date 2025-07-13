@@ -156,6 +156,26 @@ class Database:
                 )
             """)
             
+            # User ZIP codes table (NEW)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_zip_codes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    zip_code TEXT NOT NULL,
+                    is_primary BOOLEAN DEFAULT 0,
+                    label TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    UNIQUE(user_id, zip_code)
+                )
+            """)
+            
+            # Migration: Copy existing user ZIP codes to new table
+            conn.execute("""
+                INSERT OR IGNORE INTO user_zip_codes (user_id, zip_code, is_primary, label)
+                SELECT id, zip_code, 1, 'Primary' FROM users WHERE zip_code IS NOT NULL
+            """)
+            
             conn.commit()
             logger.info("Database initialized successfully")
     
@@ -464,3 +484,93 @@ class Database:
             ).fetchone()[0]
             
             return stats
+    
+    # ZIP code management (NEW)
+    def add_user_zip_code(self, user_id: int, zip_code: str, label: str = None, is_primary: bool = False) -> int:
+        """Add ZIP code for user"""
+        with self._get_connection() as conn:
+            # If setting as primary, unset other primary flags
+            if is_primary:
+                conn.execute(
+                    "UPDATE user_zip_codes SET is_primary = 0 WHERE user_id = ?",
+                    (user_id,)
+                )
+                # Also update users table
+                conn.execute(
+                    "UPDATE users SET zip_code = ? WHERE id = ?",
+                    (zip_code, user_id)
+                )
+            
+            cursor = conn.execute(
+                """INSERT OR REPLACE INTO user_zip_codes 
+                   (user_id, zip_code, is_primary, label)
+                   VALUES (?, ?, ?, ?)""",
+                (user_id, zip_code, is_primary, label or f"ZIP {zip_code}")
+            )
+            return cursor.lastrowid or 0
+
+    def get_user_zip_codes(self, user_id: int) -> List[Dict[str, Any]]:
+        """Get all ZIP codes for user"""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """SELECT * FROM user_zip_codes 
+                   WHERE user_id = ? 
+                   ORDER BY is_primary DESC, created_at""",
+                (user_id,)
+            ).fetchall()
+            
+            return [dict(row) for row in rows]
+
+    def remove_user_zip_code(self, user_id: int, zip_code: str) -> bool:
+        """Remove ZIP code from user"""
+        with self._get_connection() as conn:
+            # Check if it's primary
+            row = conn.execute(
+                "SELECT is_primary FROM user_zip_codes WHERE user_id = ? AND zip_code = ?",
+                (user_id, zip_code)
+            ).fetchone()
+            
+            if not row:
+                return False
+            
+            if row['is_primary']:
+                # Cannot remove primary ZIP
+                return False
+            
+            cursor = conn.execute(
+                "DELETE FROM user_zip_codes WHERE user_id = ? AND zip_code = ?",
+                (user_id, zip_code)
+            )
+            return cursor.rowcount > 0
+
+    def set_primary_zip_code(self, user_id: int, zip_code: str) -> bool:
+        """Set primary ZIP code for user"""
+        with self._get_connection() as conn:
+            # Check if ZIP exists for user
+            row = conn.execute(
+                "SELECT id FROM user_zip_codes WHERE user_id = ? AND zip_code = ?",
+                (user_id, zip_code)
+            ).fetchone()
+            
+            if not row:
+                return False
+            
+            # Unset all primary flags
+            conn.execute(
+                "UPDATE user_zip_codes SET is_primary = 0 WHERE user_id = ?",
+                (user_id,)
+            )
+            
+            # Set new primary
+            conn.execute(
+                "UPDATE user_zip_codes SET is_primary = 1 WHERE user_id = ? AND zip_code = ?",
+                (user_id, zip_code)
+            )
+            
+            # Update users table
+            conn.execute(
+                "UPDATE users SET zip_code = ? WHERE id = ?",
+                (zip_code, user_id)
+            )
+            
+            return True

@@ -23,7 +23,7 @@ class DMAlerts:
     
     async def send_shipping_alert(self, user_discord_id: str, product_name: str,
                                 price: float, threshold: float, product_url: str,
-                                store_id: str, site: str = "walmart") -> bool:
+                                store_id: str, site: str = "walmart", zip_info: dict = None) -> bool:
         """Send shipping availability alert"""
         
         embed = discord.Embed(
