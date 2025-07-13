@@ -129,6 +129,15 @@ async def help_command(interaction: discord.Interaction):
         inline=False
     )
     
+    embed.add_field(
+        name="📍 ZIP Code Commands",
+        value="`/zip add` - Add shipping ZIP code\n"
+              "`/zip list` - Show your ZIP codes\n"
+              "`/zip remove` - Remove ZIP code\n"
+              "`/zip set_primary` - Set primary ZIP",
+        inline=False
+    )
+    
     # Admin commands
     if Config.is_admin(interaction.user.id):
         embed.add_field(
