@@ -430,12 +430,26 @@ class Database:
                 (user_id, product_id, store_id, alert_type)
             ).fetchone()
             
-            if row:
-                # Already alerted
-                return False
+            if not row:
+                # No previous alert state, send alert
+                return True
             
-            # New alert needed
-            return True
+            # Check if price has changed since last alert
+            last_alert_price = row['last_alert_price']
+            last_alert_time = datetime.fromisoformat(row['last_alert_at'].replace('Z', '+00:00'))
+            current_time = datetime.utcnow()
+            
+            # If price is different, send new alert
+            if abs(current_price - last_alert_price) > 0.01:  # Allow for small floating point differences
+                return True
+            
+            # If price is same, check if enough time has passed (24 hours)
+            time_diff = current_time - last_alert_time
+            if time_diff.total_seconds() > 24 * 3600:  # 24 hours
+                return True
+            
+            # Same price, recent alert, don't spam
+            return False
     
     def record_alert_sent(self, user_id: int, product_id: int, store_id: str,
                          alert_type: str, price: float):
