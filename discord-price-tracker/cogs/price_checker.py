@@ -6,7 +6,7 @@ from discord.ext import commands, tasks
 import logging
 import asyncio
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 from scrapers import WalmartScraper, PriceResult
 from config import Config
@@ -27,6 +27,7 @@ class PriceChecker(commands.Cog):
         
         # Statistics
         self.checks_completed = 0
+        self.checks_failed = 0
         self.alerts_sent = 0
         self.last_check = None
         self.is_running = False
@@ -96,8 +97,12 @@ class PriceChecker(commands.Cog):
         duration = (datetime.now() - start_time).total_seconds()
         self.last_check = datetime.now()
         
+        total_attempts = self.checks_completed + self.checks_failed
+        success_rate = (self.checks_completed / total_attempts * 100) if total_attempts > 0 else 0
+        
         logger.info(f"✅ Price check completed in {duration:.1f}s - "
-                   f"{self.checks_completed} checks, {self.alerts_sent} alerts")
+                   f"{self.checks_completed} successful, {self.checks_failed} failed "
+                   f"({success_rate:.1f}% success rate), {self.alerts_sent} alerts sent")
     
     async def _process_walmart_checks(self, checks: List[Dict[str, Any]]):
         """Process Walmart price checks with multiple ZIP codes"""
@@ -196,6 +201,12 @@ class PriceChecker(commands.Cog):
         product = tracking_data['product']
         tracked = tracking_data['tracked']
         
+        # Check for scraper errors first
+        if result.error is not None:
+            self.checks_failed += 1
+            logger.warning(f"❌ Scraper error for {product.url} (user: {user.name}): {result.error}")
+            return
+        
         self.checks_completed += 1
         
         # Log price if found
@@ -214,13 +225,17 @@ class PriceChecker(commands.Cog):
         
         # Check if alert should be sent
         if result.price and result.price <= tracked.threshold:
+            # Determine availability based on alert type
+            availability = result.shipping_available if alert_type == 'shipping' else result.pickup_available
+            
             should_alert = self.db.should_send_alert(
                 user.id,
                 product.id,
                 result.store_id,
                 alert_type,
                 result.price,
-                tracked.threshold
+                tracked.threshold,
+                availability
             )
             
             if should_alert:
@@ -230,8 +245,12 @@ class PriceChecker(commands.Cog):
                     user, product, tracked,
                     result, alert_type, zip_info
                 )
+                
+                logger.info(f"💰 Price alert triggered: {product.url} at ${result.price} " +
+                           f"(threshold ${tracked.threshold}) for {user.name} " +
+                           f"from {zip_info.get('label', 'Unknown location') if zip_info else 'Unknown location'}")
     
-    async def _send_alert(self, user, product, tracked, result: PriceResult, alert_type: str, zip_info: Dict = None):
+    async def _send_alert(self, user, product, tracked, result: PriceResult, alert_type: str, zip_info: Optional[Dict] = None):
         """Send price alert"""
         
         product_name = product.name or result.product_name or "Product"
@@ -276,12 +295,17 @@ class PriceChecker(commands.Cog):
         
         if success:
             self.alerts_sent += 1
+            
+            # Determine availability for recording
+            availability = result.shipping_available if alert_type == 'shipping' else result.pickup_available
+            
             self.db.record_alert_sent(
                 user.id,
                 product.id,
                 result.store_id,
                 alert_type,
-                result.price
+                result.price,
+                availability
             )
             
             logger.info(f"✅ {alert_type} alert sent to {user.name} for {product_name}")
@@ -300,8 +324,14 @@ class PriceChecker(commands.Cog):
     
     def get_stats(self) -> Dict[str, Any]:
         """Get price checker statistics"""
+        total_attempts = self.checks_completed + self.checks_failed
+        success_rate = (self.checks_completed / total_attempts * 100) if total_attempts > 0 else 0
+        
         return {
             'checks_completed': self.checks_completed,
+            'checks_failed': self.checks_failed,
+            'total_attempts': total_attempts,
+            'success_rate': success_rate,
             'alerts_sent': self.alerts_sent,
             'last_check': self.last_check.isoformat() if self.last_check else None,
             'is_running': self.is_running,

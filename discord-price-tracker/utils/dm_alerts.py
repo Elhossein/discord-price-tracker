@@ -23,11 +23,17 @@ class DMAlerts:
     
     async def send_shipping_alert(self, user_discord_id: str, product_name: str,
                                 price: float, threshold: float, product_url: str,
-                                store_id: str, site: str = "walmart", zip_info: dict = None) -> bool:
+                                store_id: str, site: str = "walmart", zip_info: Optional[dict] = None) -> bool:
         """Send shipping availability alert"""
         
+        # Create title with location context
+        title = f"🚛 {site.upper()} SHIPPING ALERT"
+        if zip_info:
+            zip_label = zip_info.get('label', f"ZIP {zip_info.get('zip_code', '')}")
+            title += f" - {zip_label}"
+        
         embed = discord.Embed(
-            title=f"🚛 {site.upper()} SHIPPING ALERT",
+            title=title,
             description=f"**{product_name}** is available for shipping!",
             color=0x00ff00,
             timestamp=datetime.utcnow()
@@ -53,17 +59,43 @@ class DMAlerts:
             inline=True
         )
         
-        # Store info
+        # Location info with enhanced ZIP code details
         if site == "walmart":
+            location_text = f"Store #{store_id}"
+            
+            # Add ZIP code information if available
+            if zip_info:
+                zip_code = zip_info.get('zip_code', 'Unknown')
+                zip_label = zip_info.get('label', f'ZIP {zip_code}')
+                is_primary = zip_info.get('is_primary', False)
+                
+                if is_primary:
+                    location_text += f"\n📍 **{zip_label}** (Primary): {zip_code}"
+                else:
+                    location_text += f"\n📍 **{zip_label}**: {zip_code}"
+            
             embed.add_field(
-                name="📍 Store",
-                value=f"Store #{store_id}",
+                name="🏪 Shipping Location",
+                value=location_text,
                 inline=False
             )
         else:  # Target
+            location_text = "Target.com"
+            
+            # Add ZIP code information for Target
+            if zip_info:
+                zip_code = zip_info.get('zip_code', 'Unknown')
+                zip_label = zip_info.get('label', f'ZIP {zip_code}')
+                is_primary = zip_info.get('is_primary', False)
+                
+                if is_primary:
+                    location_text += f"\n📍 **{zip_label}** (Primary): {zip_code}"
+                else:
+                    location_text += f"\n📍 **{zip_label}**: {zip_code}"
+            
             embed.add_field(
-                name="📍 Shipping",
-                value="Target.com",
+                name="📍 Shipping Location",
+                value=location_text,
                 inline=False
             )
         
@@ -79,6 +111,7 @@ class DMAlerts:
         
         return await self._send_dm_with_fallback(user_discord_id, embed)
     
+
     async def send_pickup_alert(self, user_discord_id: str, product_name: str,
                               price: float, threshold: float, product_url: str,
                               store_id: str, zip_code: str) -> bool:
@@ -113,8 +146,8 @@ class DMAlerts:
         
         # Store info
         embed.add_field(
-            name="📍 Pickup Location",
-            value=f"Store #{store_id}\nZIP: {zip_code}",
+            name="🏪 Pickup Location",
+            value=f"Store #{store_id}\n📍 ZIP: {zip_code}",
             inline=False
         )
         

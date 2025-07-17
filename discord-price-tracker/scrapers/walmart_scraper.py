@@ -7,17 +7,34 @@ import re
 import time
 import uuid
 import base64
+import random
 from typing import Optional, Dict, Any
 from bs4 import BeautifulSoup
 
 from .base_scraper import BaseScraper, PriceResult
+from config import Config
 
 class WalmartScraper(BaseScraper):
     """Walmart scraper that checks both shipping and pickup availability"""
     
     def __init__(self, max_retries: int = 3, timeout: int = 30):
         super().__init__(max_retries, timeout)
-        self.scraper = cloudscraper.create_scraper()
+        
+        # Configure proxy if enabled
+        proxy_config = Config.get_proxy_config()
+        if proxy_config:
+            self.logger.info("Using proxy configuration for Walmart scraper")
+            # Create scraper with proxy configuration and better browser mimicking
+            self.scraper = cloudscraper.create_scraper(
+                browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False},
+                delay=2  # Add delay between requests
+            )
+            self.scraper.proxies = proxy_config
+        else:
+            self.logger.info("No proxy configured, using direct connection")
+            self.scraper = cloudscraper.create_scraper(
+                browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
+            )
     
     async def check_price(self, url: str, store_id: str = None, zip_code: str = None) -> PriceResult:
         """Check price and availability at Walmart"""
@@ -31,8 +48,29 @@ class WalmartScraper(BaseScraper):
             try:
                 self.logger.debug(f"Checking Walmart product: {url} (attempt {attempt + 1})")
                 
+                # Add random delay to appear more human-like
+                if attempt > 0:
+                    delay = random.uniform(1, 3)
+                    time.sleep(delay)
+                
                 response = self.scraper.get(url, headers=headers, timeout=self.timeout)
                 response.raise_for_status()
+                
+                # Check for blocked URLs
+                if 'blocked' in response.url:
+                    return PriceResult(
+                        url=url,
+                        store_id=store_id or "online",
+                        price=None,
+                        shipping_available=False,
+                        pickup_available=False,
+                        in_stock=False,
+                        error="URL blocked by Walmart"
+                    )
+                
+                # Check for redirects that might indicate issues
+                if response.url != url:
+                    self.logger.warning(f"URL redirected: {url} -> {response.url}")
                 
                 return self._parse_response(response.text, url, store_id or "online")
                 
@@ -52,14 +90,22 @@ class WalmartScraper(BaseScraper):
         )
     
     def _get_headers(self) -> Dict[str, str]:
-        """Get request headers"""
+        """Get request headers with better evasion"""
         return {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Cache-Control': 'max-age=0',
+            'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'none',
+            'sec-fetch-user': '?1',
+            'upgrade-insecure-requests': '1',
+            'Connection': 'keep-alive'
         }
     
     def _build_location_cookie(self, store_id: str, zip_code: str) -> str:
@@ -110,7 +156,18 @@ class WalmartScraper(BaseScraper):
             )
         
         try:
-            data = json.loads(script_tag.string)
+            script_content = script_tag.get_text() if script_tag else None
+            if not script_content:
+                return PriceResult(
+                    url=url,
+                    store_id=store_id,
+                    price=None,
+                    shipping_available=False,
+                    pickup_available=False,
+                    in_stock=False,
+                    error="Empty script content"
+                )
+            data = json.loads(script_content)
             product = data['props']['pageProps']['initialData']['data']['product']
             
             # Extract price

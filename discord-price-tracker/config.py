@@ -3,7 +3,7 @@
 
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -43,6 +43,13 @@ class Config:
     REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", "30"))
     RATE_LIMIT_DELAY: int = int(os.getenv("RATE_LIMIT_DELAY", "2"))
     
+    # Proxy settings
+    PROXY_ENABLED: bool = os.getenv("PROXY_ENABLED", "false").lower() == "true"
+    PROXY_HOST: str = os.getenv("PROXY_HOST", "")
+    PROXY_PORT: str = os.getenv("PROXY_PORT", "")
+    PROXY_USERNAME: str = os.getenv("PROXY_USERNAME", "")
+    PROXY_PASSWORD: str = os.getenv("PROXY_PASSWORD", "")
+    
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_DIR: str = os.getenv("LOG_DIR", "logs")
@@ -75,3 +82,24 @@ class Config:
     def is_admin(cls, user_id: int) -> bool:
         """Check if user is admin"""
         return str(user_id) in cls.ADMIN_USER_IDS
+    
+    @classmethod
+    def get_proxy_config(cls) -> Optional[Dict[str, str]]:
+        """Get proxy configuration if enabled"""
+        if (not cls.PROXY_ENABLED or 
+            not cls.PROXY_HOST or 
+            not cls.PROXY_PORT or
+            cls.PROXY_HOST == "" or 
+            cls.PROXY_PORT == ""):
+            return None
+        
+        # Build proxy URL for IPRoyal
+        if cls.PROXY_USERNAME and cls.PROXY_PASSWORD and cls.PROXY_USERNAME != "" and cls.PROXY_PASSWORD != "":
+            proxy_url = f"http://{cls.PROXY_USERNAME}:{cls.PROXY_PASSWORD}@{cls.PROXY_HOST}:{cls.PROXY_PORT}"
+        else:
+            proxy_url = f"http://{cls.PROXY_HOST}:{cls.PROXY_PORT}"
+        
+        return {
+            'http': proxy_url,
+            'https': proxy_url
+        }

@@ -149,6 +149,7 @@ class Database:
                     store_id TEXT NOT NULL,
                     alert_type TEXT NOT NULL,
                     last_alert_price REAL,
+                    last_alert_availability BOOLEAN,
                     last_alert_at TIMESTAMP,
                     PRIMARY KEY (user_id, product_id, store_id, alert_type),
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -175,6 +176,14 @@ class Database:
                 INSERT OR IGNORE INTO user_zip_codes (user_id, zip_code, is_primary, label)
                 SELECT id, zip_code, 1, 'Primary' FROM users WHERE zip_code IS NOT NULL
             """)
+            
+            # Migration: Add availability column to alert_states if it doesn't exist
+            try:
+                conn.execute("ALTER TABLE alert_states ADD COLUMN last_alert_availability BOOLEAN")
+                logger.info("Added availability tracking column to alert_states")
+            except sqlite3.OperationalError:
+                # Column already exists
+                pass
             
             conn.commit()
             logger.info("Database initialized successfully")
@@ -415,11 +424,16 @@ class Database:
     
     # Alert management
     def should_send_alert(self, user_id: int, product_id: int, store_id: str, 
-                         alert_type: str, current_price: float, threshold: float) -> bool:
-        """Check if alert should be sent"""
+                         alert_type: str, current_price: float, threshold: float,
+                         current_availability: bool = True) -> bool:
+        """Check if alert should be sent - considers both price and availability changes"""
         if current_price > threshold:
             # Price above threshold, reset alert state
             self._reset_alert_state(user_id, product_id, store_id, alert_type)
+            return False
+        
+        # Don't send alerts for unavailable products
+        if not current_availability:
             return False
         
         with self._get_connection() as conn:
@@ -431,28 +445,26 @@ class Database:
             ).fetchone()
             
             if not row:
-                # No previous alert state, send alert
+                # No previous alert state, send alert (product is available and price is good)
                 return True
             
-            # Check if price has changed since last alert
+            # Get previous state
             last_alert_price = row['last_alert_price']
-            last_alert_time = datetime.fromisoformat(row['last_alert_at'].replace('Z', '+00:00'))
-            current_time = datetime.utcnow()
+            last_alert_availability = row['last_alert_availability'] if 'last_alert_availability' in row.keys() else True  # Default to True for old records
             
-            # If price is different, send new alert
+            # Send alert if price changed
             if abs(current_price - last_alert_price) > 0.01:  # Allow for small floating point differences
                 return True
             
-            # If price is same, check if enough time has passed (24 hours)
-            time_diff = current_time - last_alert_time
-            if time_diff.total_seconds() > 24 * 3600:  # 24 hours
+            # Send alert if availability changed from unavailable to available (restocked)
+            if not last_alert_availability and current_availability:
                 return True
             
-            # Same price, recent alert, don't spam
+            # Same price and was already available, don't send duplicate alert
             return False
     
     def record_alert_sent(self, user_id: int, product_id: int, store_id: str,
-                         alert_type: str, price: float):
+                         alert_type: str, price: float, availability: bool = True):
         """Record that alert was sent"""
         with self._get_connection() as conn:
             # Record in history
@@ -466,9 +478,9 @@ class Database:
             # Update alert state
             conn.execute(
                 """INSERT OR REPLACE INTO alert_states 
-                   (user_id, product_id, store_id, alert_type, last_alert_price, last_alert_at)
-                   VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-                (user_id, product_id, store_id, alert_type, price)
+                   (user_id, product_id, store_id, alert_type, last_alert_price, last_alert_availability, last_alert_at)
+                   VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                (user_id, product_id, store_id, alert_type, price, availability)
             )
     
     def _reset_alert_state(self, user_id: int, product_id: int, store_id: str, alert_type: str):

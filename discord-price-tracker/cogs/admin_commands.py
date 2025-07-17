@@ -284,7 +284,9 @@ class AdminCommands(commands.Cog):
         if pc_stats:
             embed.add_field(
                 name="🔄 Price Checker",
-                value=f"✅ Checks: {pc_stats['checks_completed']}\n"
+                value=f"✅ Success: {pc_stats['checks_completed']}\n"
+                      f"❌ Failed: {pc_stats['checks_failed']}\n"
+                      f"📊 Rate: {pc_stats['success_rate']:.1f}%\n"
                       f"📨 Alerts: {pc_stats['alerts_sent']}\n"
                       f"⏰ Last: {pc_stats['last_check'] or 'Never'}\n"
                       f"🏃 Running: {'Yes' if pc_stats['is_running'] else 'No'}",
