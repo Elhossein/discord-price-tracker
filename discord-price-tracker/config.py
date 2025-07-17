@@ -56,7 +56,7 @@ class Config:
     
     # Bot settings
     COMMAND_PREFIX: str = "!"
-    CHECK_INTERVAL_MINUTES: int = 5
+    CHECK_INTERVAL_MINUTES: int = 15
     
     @classmethod
     def validate(cls) -> bool:
