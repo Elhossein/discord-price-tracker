@@ -223,8 +223,9 @@ class PriceChecker(commands.Cog):
             if result.product_name and not product.name:
                 self.db.update_product_name(product.id, result.product_name)
         
-        # Check if alert should be sent
-        if result.price and result.price <= tracked.threshold:
+        # ALWAYS check alert logic (even if price is above threshold)
+        # This ensures state resets properly
+        if result.price is not None:
             # Determine availability based on alert type
             availability = result.shipping_available if alert_type == 'shipping' else result.pickup_available
             
@@ -238,7 +239,8 @@ class PriceChecker(commands.Cog):
                 availability
             )
             
-            if should_alert:
+            if should_alert and result.price <= tracked.threshold:
+                # Send alert only if price is good AND should_alert is true
                 # Get ZIP info if available
                 zip_info = tracking_data.get('current_zip')
                 await self._send_alert(
