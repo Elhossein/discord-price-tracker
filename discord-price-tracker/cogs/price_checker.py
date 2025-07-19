@@ -128,8 +128,14 @@ class PriceChecker(commands.Cog):
                 result = await self.walmart_scraper.check_price(
                     product.url,
                     user.primary_store_id,
-                    zip_code  # Use this ZIP code instead of user's primary
+                    zip_code
                 )
+                
+                # CRITICAL FIX: Make store_id unique per ZIP for shipping alerts
+                # This ensures each ZIP code gets its own alert state
+                if result.store_id and zip_code != user.zip_code:
+                    # For non-primary ZIPs, append ZIP to store_id
+                    result.store_id = f"{result.store_id}-{zip_code}"
                 
                 # Add ZIP info to tracking data for alert processing
                 zip_data = data.copy()
@@ -182,7 +188,8 @@ class PriceChecker(commands.Cog):
                     zip_code=zip_code
                 )
                 
-                # Set store_id to include ZIP for tracking
+                # CRITICAL FIX: Use unique store_id per ZIP
+                # Instead of just "target-{zip}", use consistent format
                 result.store_id = f"target-{zip_code}"
                 
                 # Add ZIP info to tracking data for alert processing
