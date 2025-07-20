@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Walmart scraper for shipping and pickup checks"""
+"""Walmart scraper using ScrapeOps API"""
 
-import cloudscraper
+import requests
 import json
 import re
-import time
-import uuid
-import base64
-import random
+import asyncio
 from typing import Optional, Dict, Any
 from bs4 import BeautifulSoup
 
@@ -15,69 +12,87 @@ from .base_scraper import BaseScraper, PriceResult
 from config import Config
 
 class WalmartScraper(BaseScraper):
-    """Walmart scraper that checks both shipping and pickup availability"""
+    """Walmart scraper using ScrapeOps API to bypass bot detection"""
     
     def __init__(self, max_retries: int = 3, timeout: int = 30):
         super().__init__(max_retries, timeout)
         
-        # Configure proxy if enabled
-        proxy_config = Config.get_proxy_config()
-        if proxy_config:
-            self.logger.info("Using proxy configuration for Walmart scraper")
-            # Create scraper with proxy configuration and better browser mimicking
-            self.scraper = cloudscraper.create_scraper(
-                browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False},
-                delay=2  # Add delay between requests
-            )
-            self.scraper.proxies = proxy_config
+        # ScrapeOps API configuration
+        self.api_key = Config.SCRAPEOPS_API_KEY
+        self.base_url = 'https://proxy.scrapeops.io/v1/'
+        
+        if not self.api_key:
+            self.logger.warning("❌ SCRAPEOPS_API_KEY not configured - Walmart scraping will fail")
         else:
-            self.logger.info("No proxy configured, using direct connection")
-            self.scraper = cloudscraper.create_scraper(
-                browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
-            )
+            self.logger.info("✅ Using ScrapeOps API for Walmart scraping")
     
     async def check_price(self, url: str, store_id: str = None, zip_code: str = None) -> PriceResult:
-        """Check price and availability at Walmart"""
+        """Check price and availability at Walmart using ScrapeOps API"""
+        
+        if not self.api_key:
+            return PriceResult(
+                url=url,
+                store_id=store_id or "online",
+                price=None,
+                shipping_available=False,
+                pickup_available=False,
+                in_stock=False,
+                error="ScrapeOps API key not configured"
+            )
         
         # Build location cookies if store_id provided
-        headers = self._get_headers()
+        cookies = None
         if store_id and zip_code:
-            headers['Cookie'] = self._build_location_cookie(store_id, zip_code)
+            cookies = self._build_location_cookie(store_id, zip_code)
         
         for attempt in range(self.max_retries):
             try:
-                self.logger.debug(f"Checking Walmart product: {url} (attempt {attempt + 1})")
+                self.logger.info(f"🔄 Checking Walmart product: {url} (attempt {attempt + 1}/{self.max_retries})")
                 
-                # Add random delay to appear more human-like
+                # Add delay between retries
                 if attempt > 0:
-                    delay = random.uniform(1, 3)
-                    time.sleep(delay)
+                    delay = 2 ** attempt  # Exponential backoff
+                    self.logger.debug(f"Retry delay: {delay}s...")
+                    await asyncio.sleep(delay)
                 
-                response = self.scraper.get(url, headers=headers, timeout=self.timeout)
+                # Prepare ScrapeOps API request
+                params = {
+                    'api_key': self.api_key,
+                    'url': url,
+                    'country': 'us',
+                    'render_js': 'true',  # Enable JavaScript rendering
+                    'premium': 'true',    # Use premium proxies
+                }
+                
+                # Add cookies if available
+                if cookies:
+                    params['cookies'] = cookies
+                
+                # Make request to ScrapeOps API
+                self.logger.debug("Making ScrapeOps API request...")
+                response = requests.get(
+                    url=self.base_url,
+                    params=params,
+                    timeout=self.timeout
+                )
                 response.raise_for_status()
                 
-                # Check for blocked URLs
-                if 'blocked' in response.url:
-                    return PriceResult(
-                        url=url,
-                        store_id=store_id or "online",
-                        price=None,
-                        shipping_available=False,
-                        pickup_available=False,
-                        in_stock=False,
-                        error="URL blocked by Walmart"
-                    )
+                # Check if we got blocked or error response
+                if response.status_code != 200:
+                    self.logger.warning(f"ScrapeOps API returned status {response.status_code}")
+                    continue
                 
-                # Check for redirects that might indicate issues
-                if response.url != url:
-                    self.logger.warning(f"URL redirected: {url} -> {response.url}")
-                
+                # Parse the response
                 return self._parse_response(response.text, url, store_id or "online")
                 
-            except Exception as e:
-                self.logger.error(f"Attempt {attempt + 1} failed: {e}")
+            except requests.exceptions.RequestException as e:
+                self.logger.error(f"🌐 Request error on attempt {attempt + 1}: {e}")
                 if attempt < self.max_retries - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    continue
+            except Exception as e:
+                self.logger.error(f"❌ Unexpected error on attempt {attempt + 1}: {e}")
+                if attempt < self.max_retries - 1:
+                    continue
         
         return PriceResult(
             url=url,
@@ -90,7 +105,7 @@ class WalmartScraper(BaseScraper):
         )
     
     def _get_headers(self) -> Dict[str, str]:
-        """Get request headers with better evasion"""
+        """Get request headers for ScrapeOps API"""
         return {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
@@ -110,6 +125,10 @@ class WalmartScraper(BaseScraper):
     
     def _build_location_cookie(self, store_id: str, zip_code: str) -> str:
         """Build location cookie for store-specific checks"""
+        import time
+        import uuid
+        import base64
+        
         timestamp = int(time.time() * 1000)
         acid = str(uuid.uuid4())
         
@@ -225,6 +244,5 @@ class WalmartScraper(BaseScraper):
         return None
     
     async def close(self):
-        """Close scraper session"""
-        if hasattr(self.scraper, 'close'):
-            self.scraper.close()
+        """Close scraper session (no cleanup needed for ScrapeOps API)"""
+        pass

@@ -50,6 +50,9 @@ class Config:
     PROXY_USERNAME: str = os.getenv("PROXY_USERNAME", "")
     PROXY_PASSWORD: str = os.getenv("PROXY_PASSWORD", "")
     
+    # ScrapeOps API settings
+    SCRAPEOPS_API_KEY: str = os.getenv("SCRAPEOPS_API_KEY", "")
+    
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_DIR: str = os.getenv("LOG_DIR", "logs")
