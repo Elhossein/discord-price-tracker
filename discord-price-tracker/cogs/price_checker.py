@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Price checking cog for background tasks"""
+"""Price checking cog with concurrent scraping support"""
 
 import discord
 from discord.ext import commands, tasks
 import logging
 import asyncio
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set
+from collections import defaultdict
 
 from scrapers import WalmartScraper, PriceResult
 from config import Config
@@ -14,7 +15,7 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 class PriceChecker(commands.Cog):
-    """Background price checking"""
+    """Background price checking with concurrent scraping"""
     
     def __init__(self, bot):
         self.bot = bot
@@ -25,12 +26,24 @@ class PriceChecker(commands.Cog):
         self.walmart_scraper = WalmartScraper()
         self.target_scraper = None  # Initialize when needed
         
+        # Concurrent scraping configuration
+        self.max_concurrent_walmart = Config.MAX_CONCURRENT_WALMART  # ScrapeOps limit
+        self.max_concurrent_target = Config.MAX_CONCURRENT_TARGET   # Browser-based, be conservative
+        
+        # Semaphores for rate limiting
+        self.walmart_semaphore = asyncio.Semaphore(self.max_concurrent_walmart)
+        self.target_semaphore = asyncio.Semaphore(self.max_concurrent_target)
+        
         # Statistics
         self.checks_completed = 0
         self.checks_failed = 0
         self.alerts_sent = 0
         self.last_check = None
         self.is_running = False
+        
+        # Performance tracking
+        self.concurrent_active = 0
+        self.max_concurrent_used = 0
         
         # Start background task
         self.check_prices.start()
@@ -63,8 +76,12 @@ class PriceChecker(commands.Cog):
         logger.info("✅ Price checker ready")
     
     async def _run_price_checks(self):
-        """Run price checks for all active tracking"""
+        """Run price checks for all active tracking with concurrency"""
         start_time = datetime.now()
+        
+        # Reset performance counters
+        self.concurrent_active = 0
+        self.max_concurrent_used = 0
         
         # Get all active tracking
         tracking_data = self.db.get_all_active_tracking()
@@ -75,23 +92,35 @@ class PriceChecker(commands.Cog):
         
         logger.info(f"Checking prices for {len(tracking_data)} tracking requests")
         
-        # Group by site
-        walmart_checks = []
-        target_checks = []
+        # Build check tasks
+        walmart_tasks = []
+        target_tasks = []
         
+        # Group checks by site and prepare tasks
         for data in tracking_data:
             if data['product'].site == 'walmart':
-                walmart_checks.append(data)
+                walmart_tasks.extend(self._prepare_walmart_tasks(data))
             else:
-                target_checks.append(data)
+                target_tasks.extend(self._prepare_target_tasks(data))
         
-        # Process Walmart checks
-        if walmart_checks:
-            await self._process_walmart_checks(walmart_checks)
+        logger.info(f"📊 Prepared {len(walmart_tasks)} Walmart checks, {len(target_tasks)} Target checks")
         
-        # Process Target checks
-        if target_checks:
-            await self._process_target_checks(target_checks)
+        # Run all tasks concurrently
+        all_tasks = []
+        
+        # Add Walmart tasks with semaphore
+        for task_data in walmart_tasks:
+            task = asyncio.create_task(self._run_walmart_check_with_semaphore(task_data))
+            all_tasks.append(task)
+        
+        # Add Target tasks with semaphore
+        for task_data in target_tasks:
+            task = asyncio.create_task(self._run_target_check_with_semaphore(task_data))
+            all_tasks.append(task)
+        
+        # Wait for all tasks to complete
+        if all_tasks:
+            await asyncio.gather(*all_tasks, return_exceptions=True)
         
         # Update statistics
         duration = (datetime.now() - start_time).total_seconds()
@@ -103,103 +132,147 @@ class PriceChecker(commands.Cog):
         logger.info(f"✅ Price check completed in {duration:.1f}s - "
                    f"{self.checks_completed} successful, {self.checks_failed} failed "
                    f"({success_rate:.1f}% success rate), {self.alerts_sent} alerts sent")
+        logger.info(f"🚀 Max concurrent checks: {self.max_concurrent_used}")
     
-    async def _process_walmart_checks(self, checks: List[Dict[str, Any]]):
-        """Process Walmart price checks with multiple ZIP codes"""
-        for data in checks:
-            user = data['user']
-            product = data['product']
-            tracked = data['tracked']
-            
-            # Get all ZIP codes for this user
-            user_zips = self.db.get_user_zip_codes(user.id)
-            
-            # If no additional ZIP codes, just use primary
-            if not user_zips:
-                user_zips = [{'zip_code': user.zip_code, 'is_primary': True, 'label': 'Primary'}]
-            
-            # Check shipping from each ZIP code using primary store
-            for zip_info in user_zips:
-                zip_code = zip_info['zip_code']
-                zip_label = zip_info['label'] or f"ZIP {zip_code}"
-                
-                logger.info(f"Checking Walmart shipping from {zip_label} ({zip_code})")
-                
-                result = await self.walmart_scraper.check_price(
-                    product.url,
-                    user.primary_store_id,
-                    zip_code
-                )
-                
-                # CRITICAL FIX: Make store_id unique per ZIP for shipping alerts
-                # This ensures each ZIP code gets its own alert state
-                if result.store_id and zip_code != user.zip_code:
-                    # For non-primary ZIPs, append ZIP to store_id
-                    result.store_id = f"{result.store_id}-{zip_code}"
-                
-                # Add ZIP info to tracking data for alert processing
-                zip_data = data.copy()
-                zip_data['current_zip'] = zip_info
-                
-                await self._process_result(zip_data, result, 'shipping')
-                
-                # Small delay between ZIP checks
-                await asyncio.sleep(1)
-            
-            # Check pickup at additional stores (unchanged)
-            for store in data['pickup_stores']:
-                result = await self.walmart_scraper.check_price(
-                    product.url,
-                    store.store_id,
-                    store.zip_code
-                )
-                
-                await self._process_result(data, result, 'pickup')
-    
-    async def _process_target_checks(self, checks: List[Dict[str, Any]]):
-        """Process Target price checks with multiple ZIP codes"""
+    def _prepare_walmart_tasks(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Prepare Walmart check tasks"""
+        tasks = []
+        user = data['user']
+        product = data['product']
+        tracked = data['tracked']
         
+        # Get all ZIP codes for this user
+        user_zips = self.db.get_user_zip_codes(user.id)
+        if not user_zips:
+            user_zips = [{'zip_code': user.zip_code, 'is_primary': True, 'label': 'Primary'}]
+        
+        # Create task for each ZIP code (shipping)
+        for zip_info in user_zips:
+            task_data = {
+                'type': 'walmart_shipping',
+                'data': data.copy(),
+                'zip_info': zip_info,
+                'store_id': user.primary_store_id,
+                'zip_code': zip_info['zip_code']
+            }
+            tasks.append(task_data)
+        
+        # Create tasks for pickup stores
+        for store in data['pickup_stores']:
+            task_data = {
+                'type': 'walmart_pickup',
+                'data': data.copy(),
+                'store': store,
+                'store_id': store.store_id,
+                'zip_code': store.zip_code
+            }
+            tasks.append(task_data)
+        
+        return tasks
+    
+    def _prepare_target_tasks(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Prepare Target check tasks"""
+        tasks = []
+        user = data['user']
+        product = data['product']
+        
+        # Get all ZIP codes for this user
+        user_zips = self.db.get_user_zip_codes(user.id)
+        if not user_zips:
+            user_zips = [{'zip_code': user.zip_code, 'is_primary': True, 'label': 'Primary'}]
+        
+        # Create task for each ZIP code
+        for zip_info in user_zips:
+            task_data = {
+                'type': 'target_shipping',
+                'data': data.copy(),
+                'zip_info': zip_info,
+                'zip_code': zip_info['zip_code']
+            }
+            tasks.append(task_data)
+        
+        return tasks
+    
+    async def _run_walmart_check_with_semaphore(self, task_data: Dict[str, Any]):
+        """Run Walmart check with semaphore for rate limiting"""
+        async with self.walmart_semaphore:
+            # Track concurrent usage
+            self.concurrent_active += 1
+            self.max_concurrent_used = max(self.max_concurrent_used, self.concurrent_active)
+            
+            try:
+                user = task_data['data']['user']
+                product = task_data['data']['product']
+                
+                logger.debug(f"🔄 Walmart check: {product.url} from {task_data['zip_code']} "
+                           f"(active: {self.concurrent_active})")
+                
+                # Perform the actual check
+                result = await self.walmart_scraper.check_price(
+                    product.url,
+                    task_data['store_id'],
+                    task_data['zip_code']
+                )
+                
+                # Process based on type
+                if task_data['type'] == 'walmart_shipping':
+                    # Fix store_id for non-primary ZIPs
+                    if result.store_id and task_data['zip_code'] != user.zip_code:
+                        result.store_id = f"{result.store_id}-{task_data['zip_code']}"
+                    
+                    # Add ZIP info to tracking data
+                    task_data['data']['current_zip'] = task_data['zip_info']
+                    
+                    await self._process_result(task_data['data'], result, 'shipping')
+                else:
+                    # Pickup
+                    await self._process_result(task_data['data'], result, 'pickup')
+                    
+            except Exception as e:
+                logger.error(f"Error in Walmart check: {e}")
+                self.checks_failed += 1
+            finally:
+                self.concurrent_active -= 1
+    
+    async def _run_target_check_with_semaphore(self, task_data: Dict[str, Any]):
+        """Run Target check with semaphore for rate limiting"""
         # Initialize Target scraper if needed
         if not self.target_scraper:
             from scrapers.target_scraper import TargetLocationScraper
             self.target_scraper = TargetLocationScraper()
             await self.target_scraper.initialize()
         
-        for data in checks:
-            user = data['user']
-            product = data['product']
+        async with self.target_semaphore:
+            # Track concurrent usage
+            self.concurrent_active += 1
+            self.max_concurrent_used = max(self.max_concurrent_used, self.concurrent_active)
             
-            # Get all ZIP codes for this user
-            user_zips = self.db.get_user_zip_codes(user.id)
-            
-            # If no additional ZIP codes, just use primary
-            if not user_zips:
-                user_zips = [{'zip_code': user.zip_code, 'is_primary': True, 'label': 'Primary'}]
-            
-            # Check from each ZIP code
-            for zip_info in user_zips:
-                zip_code = zip_info['zip_code']
-                zip_label = zip_info['label'] or f"ZIP {zip_code}"
+            try:
+                product = task_data['data']['product']
+                zip_code = task_data['zip_code']
                 
-                logger.info(f"Checking Target product from {zip_label} ({zip_code})")
+                logger.debug(f"🔄 Target check: {product.url} from {zip_code} "
+                           f"(active: {self.concurrent_active})")
                 
+                # Perform the actual check
                 result = await self.target_scraper.check_price(
-                    product.url, 
+                    product.url,
                     zip_code=zip_code
                 )
                 
-                # CRITICAL FIX: Use unique store_id per ZIP
-                # Instead of just "target-{zip}", use consistent format
+                # Fix store_id
                 result.store_id = f"target-{zip_code}"
                 
-                # Add ZIP info to tracking data for alert processing
-                zip_data = data.copy()
-                zip_data['current_zip'] = zip_info
+                # Add ZIP info to tracking data
+                task_data['data']['current_zip'] = task_data['zip_info']
                 
-                await self._process_result(zip_data, result, 'shipping')
+                await self._process_result(task_data['data'], result, 'shipping')
                 
-                # Small delay between ZIP checks to avoid rate limiting
-                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Error in Target check: {e}")
+                self.checks_failed += 1
+            finally:
+                self.concurrent_active -= 1
     
     async def _process_result(self, tracking_data: Dict[str, Any], 
                             result: PriceResult, alert_type: str):
@@ -230,8 +303,7 @@ class PriceChecker(commands.Cog):
             if result.product_name and not product.name:
                 self.db.update_product_name(product.id, result.product_name)
         
-        # ALWAYS check alert logic (even if price is above threshold)
-        # This ensures state resets properly
+        # Check alert logic
         if result.price is not None:
             # Determine availability based on alert type
             availability = result.shipping_available if alert_type == 'shipping' else result.pickup_available
@@ -247,7 +319,6 @@ class PriceChecker(commands.Cog):
             )
             
             if should_alert and result.price <= tracked.threshold:
-                # Send alert only if price is good AND should_alert is true
                 # Get ZIP info if available
                 zip_info = tracking_data.get('current_zip')
                 await self._send_alert(
@@ -344,8 +415,9 @@ class PriceChecker(commands.Cog):
             'alerts_sent': self.alerts_sent,
             'last_check': self.last_check.isoformat() if self.last_check else None,
             'is_running': self.is_running,
-            'walmart_scraper': 'active',
-            'target_scraper': 'active' if self.target_scraper else 'inactive'
+            'walmart_scraper': f'active (max {self.max_concurrent_walmart} concurrent)',
+            'target_scraper': f'active (max {self.max_concurrent_target} concurrent)' if self.target_scraper else 'inactive',
+            'max_concurrent_used': self.max_concurrent_used
         }
 
 async def setup(bot):
