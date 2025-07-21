@@ -59,11 +59,7 @@ class Config:
     
     # Bot settings
     COMMAND_PREFIX: str = "!"
-    CHECK_INTERVAL_MINUTES: int = int(os.getenv("CHECK_INTERVAL_MINUTES", "15"))
-    
-    # Performance settings
-    MAX_CONCURRENT_WALMART: int = int(os.getenv("MAX_CONCURRENT_WALMART", "5"))
-    MAX_CONCURRENT_TARGET: int = int(os.getenv("MAX_CONCURRENT_TARGET", "3"))
+    CHECK_INTERVAL_MINUTES: int = 15
     
     @classmethod
     def validate(cls) -> bool:

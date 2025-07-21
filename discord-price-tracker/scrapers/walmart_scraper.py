@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Walmart scraper using ScrapeOps API"""
+"""Walmart scraper using ScrapeOps API with async support"""
 
-import requests
+import aiohttp
 import json
 import re
 import asyncio
@@ -12,7 +12,7 @@ from .base_scraper import BaseScraper, PriceResult
 from config import Config
 
 class WalmartScraper(BaseScraper):
-    """Walmart scraper using ScrapeOps API to bypass bot detection"""
+    """Walmart scraper using ScrapeOps API with non-blocking async requests"""
     
     def __init__(self, max_retries: int = 3, timeout: int = 30):
         super().__init__(max_retries, timeout)
@@ -21,10 +21,22 @@ class WalmartScraper(BaseScraper):
         self.api_key = Config.SCRAPEOPS_API_KEY
         self.base_url = 'https://proxy.scrapeops.io/v1/'
         
+        # Async session (will be created when needed)
+        self._session: Optional[aiohttp.ClientSession] = None
+        
         if not self.api_key:
             self.logger.warning("❌ SCRAPEOPS_API_KEY not configured - Walmart scraping will fail")
         else:
             self.logger.info("✅ Using ScrapeOps API for Walmart scraping")
+    
+    async def _ensure_session(self):
+        """Ensure we have an active aiohttp session"""
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            self._session = aiohttp.ClientSession(
+                timeout=timeout,
+                headers=self._get_headers()
+            )
     
     async def check_price(self, url: str, store_id: str = None, zip_code: str = None) -> PriceResult:
         """Check price and availability at Walmart using ScrapeOps API"""
@@ -39,6 +51,9 @@ class WalmartScraper(BaseScraper):
                 in_stock=False,
                 error="ScrapeOps API key not configured"
             )
+        
+        # Ensure session exists
+        await self._ensure_session()
         
         # Build location cookies if store_id provided
         cookies = None
@@ -68,25 +83,34 @@ class WalmartScraper(BaseScraper):
                 if cookies:
                     params['cookies'] = cookies
                 
-                # Make request to ScrapeOps API
-                self.logger.debug("Making ScrapeOps API request...")
-                response = requests.get(
+                # Make async request to ScrapeOps API
+                self.logger.debug("Making async ScrapeOps API request...")
+                
+                async with self._session.get(
                     url=self.base_url,
-                    params=params,
-                    timeout=self.timeout
-                )
-                response.raise_for_status()
+                    params=params
+                ) as response:
+                    response.raise_for_status()
+                    
+                    # Check if we got blocked or error response
+                    if response.status != 200:
+                        self.logger.warning(f"ScrapeOps API returned status {response.status}")
+                        continue
+                    
+                    # Get response text
+                    html = await response.text()
+                    
+                    # Parse the response
+                    return await asyncio.to_thread(
+                        self._parse_response, html, url, store_id or "online"
+                    )
                 
-                # Check if we got blocked or error response
-                if response.status_code != 200:
-                    self.logger.warning(f"ScrapeOps API returned status {response.status_code}")
-                    continue
-                
-                # Parse the response
-                return self._parse_response(response.text, url, store_id or "online")
-                
-            except requests.exceptions.RequestException as e:
+            except aiohttp.ClientError as e:
                 self.logger.error(f"🌐 Request error on attempt {attempt + 1}: {e}")
+                if attempt < self.max_retries - 1:
+                    continue
+            except asyncio.TimeoutError:
+                self.logger.error(f"⏱️ Timeout on attempt {attempt + 1}")
                 if attempt < self.max_retries - 1:
                     continue
             except Exception as e:
@@ -158,7 +182,7 @@ class WalmartScraper(BaseScraper):
         )
     
     def _parse_response(self, html: str, url: str, store_id: str) -> PriceResult:
-        """Parse Walmart response"""
+        """Parse Walmart response (runs in thread to avoid blocking)"""
         soup = BeautifulSoup(html, 'html.parser')
         
         # Find __NEXT_DATA__ script tag
@@ -244,5 +268,7 @@ class WalmartScraper(BaseScraper):
         return None
     
     async def close(self):
-        """Close scraper session (no cleanup needed for ScrapeOps API)"""
-        pass
+        """Close scraper session"""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self.logger.info("Walmart scraper session closed")

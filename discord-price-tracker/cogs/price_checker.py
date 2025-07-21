@@ -27,8 +27,8 @@ class PriceChecker(commands.Cog):
         self.target_scraper = None  # Initialize when needed
         
         # Concurrent scraping configuration
-        self.max_concurrent_walmart = Config.MAX_CONCURRENT_WALMART  # ScrapeOps limit
-        self.max_concurrent_target = Config.MAX_CONCURRENT_TARGET   # Browser-based, be conservative
+        self.max_concurrent_walmart = 5  # ScrapeOps limit
+        self.max_concurrent_target = 3   # Browser-based, be conservative
         
         # Semaphores for rate limiting
         self.walmart_semaphore = asyncio.Semaphore(self.max_concurrent_walmart)
@@ -51,6 +51,11 @@ class PriceChecker(commands.Cog):
     def cog_unload(self):
         """Clean up when cog is unloaded"""
         self.check_prices.cancel()
+        # Close scrapers
+        if self.walmart_scraper:
+            asyncio.create_task(self.walmart_scraper.close())
+        if self.target_scraper:
+            asyncio.create_task(self.target_scraper.close())
     
     @tasks.loop(minutes=Config.CHECK_INTERVAL_MINUTES)
     async def check_prices(self):
